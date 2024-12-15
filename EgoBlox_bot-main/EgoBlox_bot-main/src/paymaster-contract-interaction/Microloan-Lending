@@ -1,0 +1,133 @@
+// Import necessary modules
+import { Injectable } from '@nestjs/common';
+import { InjectModel } from '@nestjs/mongoose';
+import { Model } from 'mongoose';
+import { User } from '../database/schemas/user.schema';
+import { Transaction } from '../database/schemas/transaction.schema';
+
+@Injectable()
+export class LendingService {
+  constructor(
+    @InjectModel('User') private readonly userModel: Model<User>,
+    @InjectModel('Transaction') private readonly transactionModel: Model<Transaction>,
+  ) {}
+
+  /**
+   * Request a Loan
+   * @param userId - ID of the user requesting the loan
+   * @param amount - Loan amount requested
+   * @returns Loan request confirmation
+   */
+  async requestLoan(userId: string, amount: number): Promise<any> {
+    const user = await this.userModel.findById(userId);
+
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    // Add the loan request to the database
+    const loanRequest = new this.transactionModel({
+      userId,
+      amount,
+      type: 'loan-request',
+      status: 'pending',
+      createdAt: new Date(),
+    });
+
+    await loanRequest.save();
+
+    return {
+      message: 'Loan request submitted successfully',
+      loanRequest,
+    };
+  }
+
+  /**
+   * Approve a Loan
+   * @param loanId - ID of the loan request
+   * @param lenderId - ID of the lender approving the loan
+   * @returns Loan approval confirmation
+   */
+  async approveLoan(loanId: string, lenderId: string): Promise<any> {
+    const loanRequest = await this.transactionModel.findById(loanId);
+
+    if (!loanRequest || loanRequest.status !== 'pending') {
+      throw new Error('Loan request not found or already processed');
+    }
+
+    // Mark the loan as approved
+    loanRequest.status = 'approved';
+    loanRequest.lenderId = lenderId;
+    await loanRequest.save();
+
+    // Transfer the loan amount from lender to borrower
+    await this.transferFunds(lenderId, loanRequest.userId, loanRequest.amount);
+
+    return {
+      message: 'Loan approved and funds transferred',
+      loanRequest,
+    };
+  }
+
+  /**
+   * Repay a Loan
+   * @param loanId - ID of the loan
+   * @param amount - Amount being repaid
+   * @returns Loan repayment confirmation
+   */
+  async repayLoan(loanId: string, amount: number): Promise<any> {
+    const loanRequest = await this.transactionModel.findById(loanId);
+
+    if (!loanRequest || loanRequest.status !== 'approved') {
+      throw new Error('Loan not found or not approved');
+    }
+
+    // Check if repayment exceeds the loan amount
+    if (amount > loanRequest.amount) {
+      throw new Error('Repayment amount exceeds loan balance');
+    }
+
+    // Update loan repayment
+    loanRequest.amount -= amount;
+    if (loanRequest.amount === 0) {
+      loanRequest.status = 'repaid';
+    }
+    await loanRequest.save();
+
+    // Transfer funds from borrower to lender
+    await this.transferFunds(loanRequest.userId, loanRequest.lenderId, amount);
+
+    return {
+      message: 'Loan repayment processed',
+      loanRequest,
+    };
+  }
+
+  /**
+   * Transfer Funds
+   * @param fromUserId - ID of the sender
+   * @param toUserId - ID of the recipient
+   * @param amount - Amount to transfer
+   */
+  private async transferFunds(fromUserId: string, toUserId: string, amount: number): Promise<void> {
+    // Fetch users
+    const fromUser = await this.userModel.findById(fromUserId);
+    const toUser = await this.userModel.findById(toUserId);
+
+    if (!fromUser || !toUser) {
+      throw new Error('One or both users not found');
+    }
+
+    // Ensure sufficient balance
+    if (fromUser.balance < amount) {
+      throw new Error('Insufficient balance');
+    }
+
+    // Deduct and credit balances
+    fromUser.balance -= amount;
+    toUser.balance += amount;
+
+    await fromUser.save();
+    await toUser.save();
+  }
+}
